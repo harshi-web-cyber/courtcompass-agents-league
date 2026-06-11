@@ -26,7 +26,6 @@ def load_data():
     df_xlsx = df_xlsx.dropna(subset=["Years"])
     df_xlsx["Years"] = df_xlsx["Years"].astype(int)
 
-    # Clean main dataset
     df_main = df_main.rename(columns={
         "State/UT": "state",
         "Budget per capita on judiciary (₹) (2020–21)": "budget_per_capita",
@@ -40,7 +39,6 @@ def load_data():
         df_main["courthall_shortfall"], errors="coerce"
     )
 
-    # Clean FTC
     df_ftc = df_ftc.rename(columns={
         "State/UT": "state",
         "Number of Fast Track Court": "ftc_count",
@@ -54,11 +52,10 @@ df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 # ── Gemini setup ──────────────────────────────────────────────────────────────
 def get_gemini_client(api_key):
     genai.configure(api_key=api_key)
-   return genai.GenerativeModel("gemini-2.0-flash")
+    return genai.GenerativeModel("gemini-2.0-flash")
 
 # ── Reasoning engine ──────────────────────────────────────────────────────────
-def diagnose_state(state_name: str, df_main, df_ftc) -> dict:
-    """Extract data signals for a given state."""
+def diagnose_state(state_name, df_main, df_ftc):
     state_row = df_main[df_main["state"].str.lower() == state_name.lower()]
     ftc_row   = df_ftc[df_ftc["state"].str.lower() == state_name.lower()]
 
@@ -67,7 +64,6 @@ def diagnose_state(state_name: str, df_main, df_ftc) -> dict:
 
     row = state_row.iloc[0]
 
-    # National averages
     nat_lc_clearance = df_main[df_main["state"] != "India"]["lc_clearance_rate"].mean()
     nat_hc_clearance = df_main[df_main["state"] != "India"]["hc_clearance_rate"].mean()
     nat_pop_lc_judge = df_main[df_main["state"] != "India"]["pop_per_lc_judge"].mean()
@@ -91,7 +87,6 @@ def diagnose_state(state_name: str, df_main, df_ftc) -> dict:
         "nat_avg_lc_clearance": round(nat_lc_clearance, 1),
     }
 
-    # FTC data
     if not ftc_row.empty:
         signals["ftc_count"]   = int(ftc_row.iloc[0]["ftc_count"]) if pd.notna(ftc_row.iloc[0]["ftc_count"]) else 0
         signals["ftc_pending"] = int(ftc_row.iloc[0]["ftc_pending"]) if pd.notna(ftc_row.iloc[0]["ftc_pending"]) else 0
@@ -99,16 +94,15 @@ def diagnose_state(state_name: str, df_main, df_ftc) -> dict:
         signals["ftc_count"]   = 0
         signals["ftc_pending"] = 0
 
-    # Root cause flags
-    signals["judge_shortage"]     = signals["pop_per_lc_judge"] > signals["nat_avg_pop_lc_judge"]
-    signals["clearance_problem"]  = signals["lc_clearance_rate"] < signals["nat_avg_lc_clearance"]
-    signals["infra_shortage"]     = (signals["courthall_shortfall"] or 0) > signals["nat_avg_shortfall"]
-    signals["underfunded"]        = signals["budget_per_capita"] < signals["nat_avg_budget"]
+    signals["judge_shortage"]    = signals["pop_per_lc_judge"] > signals["nat_avg_pop_lc_judge"]
+    signals["clearance_problem"] = signals["lc_clearance_rate"] < signals["nat_avg_lc_clearance"]
+    signals["infra_shortage"]    = (signals["courthall_shortfall"] or 0) > signals["nat_avg_shortfall"]
+    signals["underfunded"]       = signals["budget_per_capita"] < signals["nat_avg_budget"]
 
     return signals
 
 
-def build_prompt(signals: dict) -> str:
+def build_prompt(signals):
     return f"""You are CourtCompass AI, an expert judicial analytics reasoning agent for India.
 
 You have been given structured data about the state of {signals['state']}. Your job is to:
@@ -133,7 +127,7 @@ INFRASTRUCTURE:
 - Infrastructure shortage flag: {'YES' if signals['infra_shortage'] else 'NO'}
 
 BUDGET:
-- Budget per capita on judiciary: ₹{signals['budget_per_capita']} (national avg: ₹{signals['nat_avg_budget']})
+- Budget per capita on judiciary: Rs.{signals['budget_per_capita']} (national avg: Rs.{signals['nat_avg_budget']})
 - Underfunded flag: {'YES - below national average' if signals['underfunded'] else 'NO'}
 
 FAST TRACK COURTS:
@@ -143,7 +137,7 @@ FAST TRACK COURTS:
 ## Your task:
 Reason through the data above and produce:
 
-1. **One-line diagnosis** (the killer insight judges love):
+1. **One-line diagnosis** (the killer insight):
    Format: "Backlog in [State] is likely driven by [cause 1] combined with [cause 2]."
 
 2. **Root Cause Analysis** (pick top 2-3 from: judge shortages, low clearance rates, infrastructure gaps, underfunding, adjournment patterns):
@@ -151,7 +145,7 @@ Reason through the data above and produce:
 
 3. **Recommended Interventions** (2-3 specific, actionable suggestions)
 
-4. **Confidence level**: High / Medium / Low — based on data completeness
+4. **Confidence level**: High / Medium / Low
 
 Be direct, data-backed, and concise. This is for policymakers and court administrators."""
 
@@ -160,18 +154,16 @@ def run_diagnosis(state_name, api_key, df_main, df_ftc):
     signals = diagnose_state(state_name, df_main, df_ftc)
     if not signals:
         return None, None
-
-    model  = get_gemini_client(api_key)
-    prompt = build_prompt(signals)
+    model    = get_gemini_client(api_key)
+    prompt   = build_prompt(signals)
     response = model.generate_content(prompt)
     return signals, response.text
 
 
-# ── UI ─────────────────────────────────────────────────────────────────────────
+# ── UI ────────────────────────────────────────────────────────────────────────
 st.title("⚖️ CourtCompass AI")
 st.caption("Reasoning agent for judicial backlog diagnosis · Microsoft Agents League Hackathon 2026")
 
-# Sidebar
 with st.sidebar:
     st.header("🔑 Configuration")
     api_key = st.text_input("Gemini API Key", type="password", placeholder="AIza...")
@@ -186,13 +178,12 @@ with st.sidebar:
     total_pending = df_tot["Number of Cases pending"].sum()
     st.metric("Total pending cases in India", f"{total_pending/1e7:.2f} Cr")
 
-# Tabs
 tab1, tab2, tab3 = st.tabs(["🔍 Diagnose a State", "📊 National Overview", "📈 Trends"])
 
-# ── Tab 1: Diagnosis ──────────────────────────────────────────────────────────
+# ── Tab 1 ─────────────────────────────────────────────────────────────────────
 with tab1:
     st.subheader("Ask CourtCompass")
-    st.markdown("Enter any Indian state to get a data-backed diagnosis of why pendency is high.")
+    st.markdown("Select any Indian state to get a data-backed diagnosis of why pendency is high.")
 
     states = sorted(df_main[df_main["state"] != "India"]["state"].dropna().tolist())
     col1, col2 = st.columns([3, 1])
@@ -212,33 +203,17 @@ with tab1:
             if signals is None:
                 st.error("State not found in dataset.")
             else:
-                # Data signals
                 st.markdown("### 📋 Data Signals")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric(
-                    "Pop per LC Judge",
-                    f"{signals['pop_per_lc_judge']:,.0f}",
-                    delta=f"Nat avg: {signals['nat_avg_pop_lc_judge']:,.0f}",
-                    delta_color="inverse"
-                )
-                m2.metric(
-                    "LC Clearance Rate",
-                    f"{signals['lc_clearance_rate']}%",
-                    delta=f"Nat avg: {signals['nat_avg_lc_clearance']}%"
-                )
-                m3.metric(
-                    "Court Hall Shortfall",
-                    f"{signals['courthall_shortfall']}%",
-                    delta=f"Nat avg: {signals['nat_avg_shortfall']}%",
-                    delta_color="inverse"
-                )
-                m4.metric(
-                    "Budget per Capita",
-                    f"₹{signals['budget_per_capita']}",
-                    delta=f"Nat avg: ₹{signals['nat_avg_budget']}"
-                )
+                m1.metric("Pop per LC Judge", f"{signals['pop_per_lc_judge']:,.0f}",
+                          delta=f"Nat avg: {signals['nat_avg_pop_lc_judge']:,.0f}", delta_color="inverse")
+                m2.metric("LC Clearance Rate", f"{signals['lc_clearance_rate']}%",
+                          delta=f"Nat avg: {signals['nat_avg_lc_clearance']}%")
+                m3.metric("Court Hall Shortfall", f"{signals['courthall_shortfall']}%",
+                          delta=f"Nat avg: {signals['nat_avg_shortfall']}%", delta_color="inverse")
+                m4.metric("Budget per Capita", f"Rs.{signals['budget_per_capita']}",
+                          delta=f"Nat avg: Rs.{signals['nat_avg_budget']}")
 
-                # Root cause flags
                 st.markdown("### 🚩 Root Cause Flags")
                 f1, f2, f3, f4 = st.columns(4)
                 f1.error("🔴 Judge Shortage") if signals["judge_shortage"] else f1.success("🟢 Judge Capacity OK")
@@ -246,101 +221,68 @@ with tab1:
                 f3.error("🔴 Infra Shortage") if signals["infra_shortage"] else f3.success("🟢 Infra OK")
                 f4.error("🔴 Underfunded") if signals["underfunded"] else f4.success("🟢 Budget OK")
 
-                # AI diagnosis
                 st.markdown("### 🧠 AI Diagnosis")
                 st.markdown(diagnosis)
 
-                # FTC note
                 if signals["ftc_count"] > 0:
-                    st.info(f"ℹ️ {selected_state} has {signals['ftc_count']} Fast Track Courts with {signals['ftc_pending']:,} cases still pending in them.")
+                    st.info(f"ℹ️ {selected_state} has {signals['ftc_count']} Fast Track Courts with {signals['ftc_pending']:,} cases still pending.")
 
-# ── Tab 2: National Overview ──────────────────────────────────────────────────
+# ── Tab 2 ─────────────────────────────────────────────────────────────────────
 with tab2:
     st.subheader("National Overview")
-
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("**Cases per Lower Court Judge by State**")
+        st.markdown("**Population per Lower Court Judge by State**")
         df_plot = df_main[df_main["state"] != "India"].sort_values("pop_per_lc_judge", ascending=True)
-        fig = px.bar(
-            df_plot.tail(15),
-            x="pop_per_lc_judge",
-            y="state",
-            orientation="h",
-            color="pop_per_lc_judge",
-            color_continuous_scale="Reds",
-            labels={"pop_per_lc_judge": "Population per Judge", "state": ""},
-        )
+        fig = px.bar(df_plot.tail(15), x="pop_per_lc_judge", y="state", orientation="h",
+                     color="pop_per_lc_judge", color_continuous_scale="Reds",
+                     labels={"pop_per_lc_judge": "Population per Judge", "state": ""})
         fig.update_layout(showlegend=False, height=450, coloraxis_showscale=False)
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
         st.markdown("**Lower Court Clearance Rate by State**")
         df_plot2 = df_main[df_main["state"] != "India"].sort_values("lc_clearance_rate", ascending=True)
-        fig2 = px.bar(
-            df_plot2.tail(15),
-            x="lc_clearance_rate",
-            y="state",
-            orientation="h",
-            color="lc_clearance_rate",
-            color_continuous_scale="RdYlGn",
-            labels={"lc_clearance_rate": "Clearance Rate (%)", "state": ""},
-        )
+        fig2 = px.bar(df_plot2.tail(15), x="lc_clearance_rate", y="state", orientation="h",
+                      color="lc_clearance_rate", color_continuous_scale="RdYlGn",
+                      labels={"lc_clearance_rate": "Clearance Rate (%)", "state": ""})
         fig2.add_vline(x=100, line_dash="dash", line_color="gray", annotation_text="100% line")
         fig2.update_layout(showlegend=False, height=450, coloraxis_showscale=False)
         st.plotly_chart(fig2, use_container_width=True)
 
-    # Court hall shortfall map
     st.markdown("**Court Hall Shortfall % by State**")
     df_short = df_main[df_main["state"] != "India"][["state", "courthall_shortfall"]].dropna()
-    fig3 = px.bar(
-        df_short.sort_values("courthall_shortfall", ascending=False),
-        x="state", y="courthall_shortfall",
-        color="courthall_shortfall",
-        color_continuous_scale="RdYlGn_r",
-        labels={"courthall_shortfall": "Shortfall (%)", "state": "State"}
-    )
+    fig3 = px.bar(df_short.sort_values("courthall_shortfall", ascending=False),
+                  x="state", y="courthall_shortfall", color="courthall_shortfall",
+                  color_continuous_scale="RdYlGn_r",
+                  labels={"courthall_shortfall": "Shortfall (%)", "state": "State"})
     fig3.update_layout(height=350, coloraxis_showscale=False)
     st.plotly_chart(fig3, use_container_width=True)
 
-# ── Tab 3: Trends ─────────────────────────────────────────────────────────────
+# ── Tab 3 ─────────────────────────────────────────────────────────────────────
 with tab3:
     st.subheader("Institution vs Disposal Trends (All India)")
 
     fig4 = go.Figure()
-    fig4.add_trace(go.Scatter(
-        x=df_xlsx["Years"], y=df_xlsx["Institution"],
-        name="Cases Filed", line=dict(color="#EF553B", width=2),
-        fill="tozeroy", fillcolor="rgba(239,85,59,0.1)"
-    ))
-    fig4.add_trace(go.Scatter(
-        x=df_xlsx["Years"], y=df_xlsx["Disposal"],
-        name="Cases Disposed", line=dict(color="#00CC96", width=2),
-        fill="tozeroy", fillcolor="rgba(0,204,150,0.1)"
-    ))
-    fig4.update_layout(
-        height=400,
-        xaxis_title="Year",
-        yaxis_title="Number of Cases",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
+    fig4.add_trace(go.Scatter(x=df_xlsx["Years"], y=df_xlsx["Institution"],
+                              name="Cases Filed", line=dict(color="#EF553B", width=2),
+                              fill="tozeroy", fillcolor="rgba(239,85,59,0.1)"))
+    fig4.add_trace(go.Scatter(x=df_xlsx["Years"], y=df_xlsx["Disposal"],
+                              name="Cases Disposed", line=dict(color="#00CC96", width=2),
+                              fill="tozeroy", fillcolor="rgba(0,204,150,0.1)"))
+    fig4.update_layout(height=400, xaxis_title="Year", yaxis_title="Number of Cases",
+                       hovermode="x unified",
+                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     st.plotly_chart(fig4, use_container_width=True)
     st.caption("Gap between filed and disposed = growing backlog. Note the 2020 COVID dip in disposals.")
 
     st.markdown("**High Court Pendency (2022)**")
     df_hc_plot = df_hc[df_hc["Name of the High Court"] != "Total"].sort_values(
-        "Pendency as on 31-12-2022", ascending=True
-    )
-    fig5 = px.bar(
-        df_hc_plot,
-        x="Pendency as on 31-12-2022",
-        y="Name of the High Court",
-        orientation="h",
-        color="Pendency as on 31-12-2022",
-        color_continuous_scale="Reds",
-        labels={"Pendency as on 31-12-2022": "Pending Cases", "Name of the High Court": ""}
-    )
+        "Pendency as on 31-12-2022", ascending=True)
+    fig5 = px.bar(df_hc_plot, x="Pendency as on 31-12-2022", y="Name of the High Court",
+                  orientation="h", color="Pendency as on 31-12-2022",
+                  color_continuous_scale="Reds",
+                  labels={"Pendency as on 31-12-2022": "Pending Cases", "Name of the High Court": ""})
     fig5.update_layout(height=500, coloraxis_showscale=False)
     st.plotly_chart(fig5, use_container_width=True)
