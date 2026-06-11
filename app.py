@@ -52,25 +52,42 @@ def load_data():
 
 df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 
-# ── Gemini setup ──────────────────────────────────────────────────────────────
-def get_gemini_client(api_key):
-    genai.configure(api_key=api_key)
-    # gemini-1.5-flash has much higher free-tier RPM than gemini-2.0-flash
-    return genai.GenerativeModel("gemini-2.0-flash-lite")
+# ── Gemini setup — try models in order of free-tier availability ──────────────
+MODELS_TO_TRY = [
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro-latest",
+]
 
-# ── Retry wrapper ─────────────────────────────────────────────────────────────
-def generate_with_retry(model, prompt, max_retries=3):
-    """Call model.generate_content with exponential backoff on quota errors."""
-    for attempt in range(max_retries):
-        try:
-            return model.generate_content(prompt)
-        except ResourceExhausted:
-            if attempt < max_retries - 1:
-                wait_secs = 2 ** attempt * 5  # 5s → 10s → 20s
-                st.toast(f"⏳ Rate limit hit — retrying in {wait_secs}s (attempt {attempt + 1}/{max_retries})...")
-                time.sleep(wait_secs)
-            else:
-                raise  # re-raise after final attempt so the caller can handle it
+def generate_with_fallback(api_key, prompt):
+    """
+    Try each model in MODELS_TO_TRY with exponential backoff.
+    Moves to the next model when quota is exhausted.
+    """
+    genai.configure(api_key=api_key)
+    last_error = None
+
+    for model_name in MODELS_TO_TRY:
+        model = genai.GenerativeModel(model_name)
+        for attempt in range(3):
+            try:
+                return model.generate_content(prompt)
+            except ResourceExhausted as e:
+                last_error = e
+                if attempt < 2:
+                    wait = 10 * (attempt + 1)   # 10s, 20s
+                    st.toast(f"⏳ [{model_name}] quota hit — waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    st.toast(f"⚠️ {model_name} exhausted, trying next model...")
+                    break
+            except Exception as e:
+                last_error = e
+                st.toast(f"⚠️ {model_name} error: {e} — trying next model...")
+                break
+
+    raise ResourceExhausted(f"All models exhausted: {last_error}")
 
 # ── Reasoning engine ──────────────────────────────────────────────────────────
 def diagnose_state(state_name, df_main, df_ftc):
@@ -168,33 +185,22 @@ Reason through the data above and produce:
 Be direct, data-backed, and concise. This is for policymakers and court administrators."""
 
 
-# ── Cached diagnosis (prevents redundant API calls for same state) ─────────────
+# ── Cached diagnosis ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_diagnosis_cached(state_name, api_key, df_main_json, df_ftc_json):
-    """
-    Cache diagnosis results for 1 hour per (state, api_key) pair.
-    DataFrames are passed as JSON strings so they are hashable by st.cache_data.
-    """
     df_main_local = pd.read_json(StringIO(df_main_json))
     df_ftc_local  = pd.read_json(StringIO(df_ftc_json))
-
     signals = diagnose_state(state_name, df_main_local, df_ftc_local)
     if not signals:
         return None, None
-
-    model    = get_gemini_client(api_key)
-    prompt   = build_prompt(signals)
-    response = generate_with_retry(model, prompt)
+    response = generate_with_fallback(api_key, build_prompt(signals))
     return signals, response.text
 
 
 def run_diagnosis(state_name, api_key, df_main, df_ftc):
-    """Public entry point — serialises DataFrames and delegates to cached fn."""
     return run_diagnosis_cached(
-        state_name,
-        api_key,
-        df_main.to_json(),
-        df_ftc.to_json(),
+        state_name, api_key,
+        df_main.to_json(), df_ftc.to_json(),
     )
 
 
@@ -240,13 +246,12 @@ with tab1:
                     signals, diagnosis = run_diagnosis(selected_state, api_key, df_main, df_ftc)
                 except ResourceExhausted:
                     st.error(
-                        "⚠️ **Gemini API quota exceeded.** "
-                        "The free tier rate limit was hit even after retrying. "
-                        "Please wait a minute and try again, or use a different API key."
+                        "⚠️ **All Gemini models exhausted quota.** "
+                        "Please generate a new API key at [aistudio.google.com](https://aistudio.google.com) and try again."
                     )
                     st.stop()
                 except Exception as e:
-                    st.error(f"⚠️ An unexpected error occurred: {e}")
+                    st.error(f"⚠️ Unexpected error: {e}")
                     st.stop()
 
             if signals is None:
