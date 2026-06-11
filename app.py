@@ -56,7 +56,7 @@ df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 def get_gemini_client(api_key):
     genai.configure(api_key=api_key)
     # gemini-1.5-flash has much higher free-tier RPM than gemini-2.0-flash
-    return genai.GenerativeModel("gemini-1.5-flash")
+    return genai.GenerativeModel("gemini-2.0-flash-lite")
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────────
 def generate_with_retry(model, prompt, max_retries=3):
