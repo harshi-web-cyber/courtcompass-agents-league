@@ -1,5 +1,4 @@
 # ⚖️ CourtCompass AI
-
 > **Microsoft Agents League Hackathon 2026 · Reasoning Agents Track**
 
 An AI-powered reasoning agent that diagnoses the root causes of judicial backlog in Indian courts — and recommends targeted interventions.
@@ -39,14 +38,12 @@ Judicial Datasets (CSV/XLSX)
         ↓
 Data Layer (Pandas — cleaning, merging, signal extraction)
         ↓
-Reasoning Layer (Google Gemini 1.5 Flash / Azure AI Foundry*)
+Reasoning Layer (Claude Haiku · Anthropic API)
         ↓
 Streamlit UI (diagnosis + visualizations)
         ↓
 Deployed on Streamlit Cloud
 ```
-
-*Azure AI Foundry is the intended production deployment target.
 
 ---
 
@@ -59,15 +56,16 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Add your Gemini API key in the sidebar when the app opens.
+Add your Anthropic API key (`sk-ant-...`) in the sidebar when the app opens.
+Get a key at: https://console.anthropic.com
 
 ---
 
 ## 🛠️ Tech Stack
 
 - Python · Pandas · Streamlit · Plotly
-- Google Gemini 1.5 Flash (LLM reasoning layer)
-- GitHub
+- **Claude Haiku 3.5** (Anthropic) — LLM reasoning layer
+- GitHub · Streamlit Cloud
 
 ---
 
