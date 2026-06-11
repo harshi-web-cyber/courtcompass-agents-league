@@ -1,19 +1,13 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+import anthropic
 import plotly.express as px
 import plotly.graph_objects as go
 import time
-import os
 from io import StringIO
 
-# ── Page config ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="CourtCompass AI",
-    page_icon="⚖️",
-    layout="wide"
-)
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(page_title="CourtCompass AI", page_icon="⚖️", layout="wide")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
@@ -41,53 +35,72 @@ def load_data():
     df_main["courthall_shortfall"] = pd.to_numeric(
         df_main["courthall_shortfall"], errors="coerce"
     )
-
     df_ftc = df_ftc.rename(columns={
         "State/UT": "state",
         "Number of Fast Track Court": "ftc_count",
         "Number of Cases pending": "ftc_pending"
     })
-
     return df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx
 
 df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 
-# ── Gemini setup — try models in order of free-tier availability ──────────────
-MODELS_TO_TRY = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro-latest",
+# ── Claude model fallback chain (cheapest → most capable) ────────────────────
+CLAUDE_MODELS = [
+    "claude-haiku-4-5",          # fastest, cheapest — try first
+    "claude-sonnet-4-5",         # mid-tier fallback
+    "claude-opus-4-5",           # most capable, last resort
 ]
 
 def generate_with_fallback(api_key, prompt):
     """
-    Try each model in MODELS_TO_TRY with exponential backoff.
-    Moves to the next model when quota is exhausted.
+    Try each Claude model in order with retry + exponential backoff.
+    Moves to next model on rate limit (529) or overload (529/500).
+    Raises RuntimeError if all models fail.
     """
-    genai.configure(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key)
     last_error = None
 
-    for model_name in MODELS_TO_TRY:
-        model = genai.GenerativeModel(model_name)
+    for model_name in CLAUDE_MODELS:
         for attempt in range(3):
             try:
-                return model.generate_content(prompt)
-            except ResourceExhausted as e:
+                message = client.messages.create(
+                    model=model_name,
+                    max_tokens=1024,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return message.content[0].text   # success — return immediately
+
+            except anthropic.RateLimitError as e:
                 last_error = e
                 if attempt < 2:
-                    wait = 10 * (attempt + 1)   # 10s, 20s
-                    st.toast(f"⏳ [{model_name}] quota hit — waiting {wait}s...")
+                    wait = 10 * (attempt + 1)    # 10s → 20s
+                    st.toast(f"⏳ [{model_name}] rate limit — retrying in {wait}s...")
                     time.sleep(wait)
                 else:
-                    st.toast(f"⚠️ {model_name} exhausted, trying next model...")
+                    st.toast(f"⚠️ {model_name} rate limited, trying next model...")
                     break
-            except Exception as e:
+
+            except anthropic.APIStatusError as e:
                 last_error = e
-                st.toast(f"⚠️ {model_name} error: {e} — trying next model...")
+                if e.status_code in (500, 529):  # overloaded
+                    if attempt < 2:
+                        wait = 10 * (attempt + 1)
+                        st.toast(f"⏳ [{model_name}] overloaded — retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        st.toast(f"⚠️ {model_name} overloaded, trying next model...")
+                        break
+                else:
+                    # auth errors, bad request etc — no point retrying
+                    raise
+
+            except anthropic.APIConnectionError as e:
+                last_error = e
+                st.toast(f"⚠️ Connection error on {model_name}, trying next model...")
                 break
 
-    raise ResourceExhausted(f"All models exhausted: {last_error}")
+    raise RuntimeError(f"All Claude models failed. Last error: {last_error}")
+
 
 # ── Reasoning engine ──────────────────────────────────────────────────────────
 def diagnose_state(state_name, df_main, df_ftc):
@@ -193,8 +206,8 @@ def run_diagnosis_cached(state_name, api_key, df_main_json, df_ftc_json):
     signals = diagnose_state(state_name, df_main_local, df_ftc_local)
     if not signals:
         return None, None
-    response = generate_with_fallback(api_key, build_prompt(signals))
-    return signals, response.text
+    diagnosis = generate_with_fallback(api_key, build_prompt(signals))
+    return signals, diagnosis
 
 
 def run_diagnosis(state_name, api_key, df_main, df_ftc):
@@ -210,7 +223,7 @@ st.caption("Reasoning agent for judicial backlog diagnosis · Microsoft Agents L
 
 with st.sidebar:
     st.header("🔑 Configuration")
-    api_key = st.text_input("Gemini API Key", type="password", placeholder="AIza...")
+    api_key = st.text_input("Anthropic API Key", type="password", placeholder="sk-ant-...")
     st.divider()
     st.markdown("**📊 Datasets loaded:**")
     st.success(f"✅ State judiciary indicators — {len(df_main)-1} states")
@@ -239,16 +252,19 @@ with tab1:
 
     if diagnose_btn:
         if not api_key:
-            st.error("Please enter your Gemini API key in the sidebar.")
+            st.error("Please enter your Anthropic API key in the sidebar.")
         else:
             with st.spinner(f"Analysing {selected_state}..."):
                 try:
                     signals, diagnosis = run_diagnosis(selected_state, api_key, df_main, df_ftc)
-                except ResourceExhausted:
-                    st.error(
-                        "⚠️ **All Gemini models exhausted quota.** "
-                        "Please generate a new API key at [aistudio.google.com](https://aistudio.google.com) and try again."
-                    )
+                except anthropic.AuthenticationError:
+                    st.error("❌ **Invalid API key.** Check your key at [console.anthropic.com](https://console.anthropic.com).")
+                    st.stop()
+                except anthropic.RateLimitError:
+                    st.error("⚠️ **Rate limit hit on all models.** Wait a minute and try again.")
+                    st.stop()
+                except RuntimeError as e:
+                    st.error(f"⚠️ {e}")
                     st.stop()
                 except Exception as e:
                     st.error(f"⚠️ Unexpected error: {e}")
