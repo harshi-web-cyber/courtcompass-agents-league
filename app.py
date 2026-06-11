@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import time
 import os
+from io import StringIO
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -174,8 +175,8 @@ def run_diagnosis_cached(state_name, api_key, df_main_json, df_ftc_json):
     Cache diagnosis results for 1 hour per (state, api_key) pair.
     DataFrames are passed as JSON strings so they are hashable by st.cache_data.
     """
-    df_main_local = pd.read_json(df_main_json)
-    df_ftc_local  = pd.read_json(df_ftc_json)
+    df_main_local = pd.read_json(StringIO(df_main_json))
+    df_ftc_local  = pd.read_json(StringIO(df_ftc_json))
 
     signals = diagnose_state(state_name, df_main_local, df_ftc_local)
     if not signals:
