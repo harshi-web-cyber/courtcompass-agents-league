@@ -54,7 +54,7 @@ df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 # ── Gemini setup ──────────────────────────────────────────────────────────────
 def get_gemini_client(api_key):
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-1.5-flash")
+   return genai.GenerativeModel("gemini-2.0-flash")
 
 # ── Reasoning engine ──────────────────────────────────────────────────────────
 def diagnose_state(state_name: str, df_main, df_ftc) -> dict:
