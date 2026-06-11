@@ -15,13 +15,13 @@ st.set_page_config(
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df_main = pd.read_csv("data/Pendency_of_Court_Cases_in_India.csv")
+    df_main = pd.read_csv("data/Pendency of Court Cases in India.csv")
     df_hc   = pd.read_csv("data/RS_Session_259_AU_119_1.csv")
-    df_ftc  = pd.read_csv("data/RS_Session_254_AU_419_A.csv")
+    df_ftc  = pd.read_csv("data/RS_Session_254_AU_419.A.csv")
     df_disp = pd.read_csv("data/RS_Session_256_AU_4038_4.csv")
     df_tot  = pd.read_csv("data/RS_Session_256_AU_3321_A_to_D.csv")
 
-    df_xlsx = pd.read_excel("data/Report__4_.xlsx", skiprows=1)
+    df_xlsx = pd.read_excel("data/Report (4).xlsx", skiprows=1)
     df_xlsx.columns = ["Years", "Institution", "Disposal"]
     df_xlsx = df_xlsx.dropna(subset=["Years"])
     df_xlsx["Years"] = df_xlsx["Years"].astype(int)
