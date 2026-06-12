@@ -29,7 +29,7 @@ df_main = load_data()
 # ── GEMINI ───────────────────────────
 def setup_gemini(api_key):
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-1.5-flash")
+    return genai.GenerativeModel("models/gemini-1.5-flash-latest")
 
 
 def generate(model, prompt):
