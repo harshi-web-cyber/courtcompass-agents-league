@@ -26,9 +26,14 @@ def load_data():
 
 df_main = load_data()
 
-# ── GEMINI ───────────────────────────
+# ── GEMINI FIXED SETUP ─────────────────────────────
 def setup_gemini(api_key):
-    genai.configure(api_key=api_key)
+    genai.configure(
+        api_key=api_key,
+        transport="rest"   # fixes v1beta issues
+    )
+
+    # IMPORTANT: correct working model name
     return genai.GenerativeModel("models/gemini-1.5-flash-latest")
 
 
@@ -40,7 +45,7 @@ def generate(model, prompt):
         return f"ERROR: {str(e)}"
 
 
-# ── ANALYSIS ─────────────────────────
+# ── ANALYSIS ENGINE ─────────────────────────────
 def analyze(state):
     row = df_main[df_main["state"].str.lower() == state.lower()]
     if row.empty:
@@ -48,26 +53,22 @@ def analyze(state):
 
     row = row.iloc[0]
 
-    nat_lc = df_main["lc_clearance_rate"].mean()
-    nat_pop = df_main["pop_per_lc_judge"].mean()
-    nat_budget = df_main["budget_per_capita"].mean()
-
     return {
         "state": state,
         "lc_clearance_rate": float(row["lc_clearance_rate"]),
         "pop_per_lc_judge": float(row["pop_per_lc_judge"]),
         "budget_per_capita": float(row["budget_per_capita"]),
         "courthall_shortfall": float(row["courthall_shortfall"] or 0),
-        "nat_lc": round(nat_lc, 2),
-        "nat_pop": round(nat_pop, 0),
-        "nat_budget": round(nat_budget, 0),
+        "nat_lc": round(df_main["lc_clearance_rate"].mean(), 2),
+        "nat_pop": round(df_main["pop_per_lc_judge"].mean(), 0),
+        "nat_budget": round(df_main["budget_per_capita"].mean(), 0),
     }
 
 
-# ── PROMPT ───────────────────────────
+# ── PROMPT ─────────────────────────────
 def build_prompt(s):
     return f"""
-You are CourtCompass AI (judicial analytics agent).
+You are CourtCompass AI (policy reasoning agent).
 
 STATE: {s['state']}
 
@@ -75,13 +76,13 @@ DATA:
 - Clearance rate: {s['lc_clearance_rate']} vs national {s['nat_lc']}
 - Judge load: {s['pop_per_lc_judge']} vs national {s['nat_pop']}
 - Budget: {s['budget_per_capita']} vs national {s['nat_budget']}
-- Infra gap: {s['courthall_shortfall']}
+- Infrastructure shortfall: {s['courthall_shortfall']}
 
 TASK:
 1. One-line diagnosis
-2. Top 2 causes with evidence
-3. 2 solutions
-4. Confidence level
+2. Top 2 root causes with evidence
+3. 2 actionable interventions
+4. Confidence level (High/Medium/Low)
 """
 
 
@@ -95,13 +96,13 @@ state = st.selectbox("Select State", states)
 
 if st.button("Diagnose"):
     if not api_key:
-        st.error("Enter API key")
+        st.error("Enter Gemini API key")
     else:
         model = setup_gemini(api_key)
         data = analyze(state)
 
         if data is None:
-            st.error("State not found")
+            st.error("State not found in dataset")
         else:
             prompt = build_prompt(data)
             result = generate(model, prompt)
