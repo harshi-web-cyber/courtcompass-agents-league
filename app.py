@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
-from groq import Groq
 import plotly.express as px
 import plotly.graph_objects as go
 import time
+import google.generativeai as genai
 from io import StringIO
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -46,32 +46,17 @@ def load_data():
 
 df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 
-# ── GROQ CONFIG ───────────────────────────────────────────────────────────────
-GROQ_MODELS = [
-    "llama-3.1-8b-instant",
-    "llama-3.1-70b-versatile",
-]
+# ── GEMINI CONFIG ─────────────────────────────────────────────────────────────
+def generate_with_gemini(api_key, prompt):
+    genai.configure(api_key=api_key)
 
-def generate_with_fallback(api_key, prompt):
-    client = Groq(api_key=api_key)
-    last_error = None
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
-    for model_name in GROQ_MODELS:
-        for attempt in range(2):
-            try:
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=900,
-                )
-                return response.choices[0].message.content
-
-            except Exception as e:
-                last_error = e
-                time.sleep(1)
-
-    raise RuntimeError(f"Groq failed: {last_error}")
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        raise RuntimeError(f"Gemini failed: {e}")
 
 # ── Reasoning engine ──────────────────────────────────────────────────────────
 def diagnose_state(state_name, df_main, df_ftc):
@@ -144,7 +129,7 @@ TASK:
 st.title("⚖️ CourtCompass AI")
 
 with st.sidebar:
-    api_key = st.text_input("Groq API Key", type="password")
+    api_key = st.text_input("Gemini API Key", type="password", placeholder="AIza...")
 
 tab1, tab2, tab3 = st.tabs(["State", "National", "Trends"])
 
@@ -154,12 +139,13 @@ with tab1:
 
     if st.button("Diagnose"):
         if not api_key:
-            st.error("Enter API key")
+            st.error("Enter Gemini API key")
         else:
             signals = diagnose_state(state, df_main, df_ftc)
+
             if signals:
                 prompt = build_prompt(signals)
-                result = generate_with_fallback(api_key, prompt)
+                result = generate_with_gemini(api_key, prompt)
 
                 st.subheader("Diagnosis")
                 st.write(result)
