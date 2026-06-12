@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import anthropic
+from groq import Groq
 import plotly.express as px
 import plotly.graph_objects as go
 import time
@@ -32,75 +32,46 @@ def load_data():
         "Case clearance rate of High Court (2022)": "hc_clearance_rate",
         "Case clearance rate of Lower Court (2022)": "lc_clearance_rate",
     })
-    df_main["courthall_shortfall"] = pd.to_numeric(
-        df_main["courthall_shortfall"], errors="coerce"
-    )
+
+    df_main["courthall_shortfall"] = pd.to_numeric(df_main["courthall_shortfall"], errors="coerce")
+
     df_ftc = df_ftc.rename(columns={
         "State/UT": "state",
         "Number of Fast Track Court": "ftc_count",
         "Number of Cases pending": "ftc_pending"
     })
+
     return df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx
+
 
 df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 
-# ── Claude model fallback chain (cheapest → most capable) ────────────────────
-CLAUDE_MODELS = [
-    "claude-haiku-4-5",          # fastest, cheapest — try first
-    "claude-sonnet-4-5",         # mid-tier fallback
-    "claude-opus-4-5",           # most capable, last resort
+# ── GROQ CONFIG ───────────────────────────────────────────────────────────────
+GROQ_MODELS = [
+    "llama-3.1-8b-instant",
+    "llama-3.1-70b-versatile",
 ]
 
 def generate_with_fallback(api_key, prompt):
-    """
-    Try each Claude model in order with retry + exponential backoff.
-    Moves to next model on rate limit (529) or overload (529/500).
-    Raises RuntimeError if all models fail.
-    """
-    client = anthropic.Anthropic(api_key=api_key)
+    client = Groq(api_key=api_key)
     last_error = None
 
-    for model_name in CLAUDE_MODELS:
-        for attempt in range(3):
+    for model_name in GROQ_MODELS:
+        for attempt in range(2):
             try:
-                message = client.messages.create(
+                response = client.chat.completions.create(
                     model=model_name,
-                    max_tokens=1024,
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=900,
                 )
-                return message.content[0].text   # success — return immediately
+                return response.choices[0].message.content
 
-            except anthropic.RateLimitError as e:
+            except Exception as e:
                 last_error = e
-                if attempt < 2:
-                    wait = 10 * (attempt + 1)    # 10s → 20s
-                    st.toast(f"⏳ [{model_name}] rate limit — retrying in {wait}s...")
-                    time.sleep(wait)
-                else:
-                    st.toast(f"⚠️ {model_name} rate limited, trying next model...")
-                    break
+                time.sleep(1)
 
-            except anthropic.APIStatusError as e:
-                last_error = e
-                if e.status_code in (500, 529):  # overloaded
-                    if attempt < 2:
-                        wait = 10 * (attempt + 1)
-                        st.toast(f"⏳ [{model_name}] overloaded — retrying in {wait}s...")
-                        time.sleep(wait)
-                    else:
-                        st.toast(f"⚠️ {model_name} overloaded, trying next model...")
-                        break
-                else:
-                    # auth errors, bad request etc — no point retrying
-                    raise
-
-            except anthropic.APIConnectionError as e:
-                last_error = e
-                st.toast(f"⚠️ Connection error on {model_name}, trying next model...")
-                break
-
-    raise RuntimeError(f"All Claude models failed. Last error: {last_error}")
-
+    raise RuntimeError(f"Groq failed: {last_error}")
 
 # ── Reasoning engine ──────────────────────────────────────────────────────────
 def diagnose_state(state_name, df_main, df_ftc):
@@ -127,7 +98,7 @@ def diagnose_state(state_name, df_main, df_ftc):
         "nat_avg_pop_hc_judge": round(nat_pop_hc_judge),
         "pop_per_lc_judge": float(row["pop_per_lc_judge"]),
         "nat_avg_pop_lc_judge": round(nat_pop_lc_judge),
-        "courthall_shortfall": float(row["courthall_shortfall"]) if pd.notna(row["courthall_shortfall"]) else None,
+        "courthall_shortfall": float(row["courthall_shortfall"]) if pd.notna(row["courthall_shortfall"]) else 0,
         "nat_avg_shortfall": round(nat_shortfall, 1),
         "hc_clearance_rate": float(row["hc_clearance_rate"]),
         "lc_clearance_rate": float(row["lc_clearance_rate"]),
@@ -136,223 +107,59 @@ def diagnose_state(state_name, df_main, df_ftc):
     }
 
     if not ftc_row.empty:
-        signals["ftc_count"]   = int(ftc_row.iloc[0]["ftc_count"]) if pd.notna(ftc_row.iloc[0]["ftc_count"]) else 0
+        signals["ftc_count"] = int(ftc_row.iloc[0]["ftc_count"]) if pd.notna(ftc_row.iloc[0]["ftc_count"]) else 0
         signals["ftc_pending"] = int(ftc_row.iloc[0]["ftc_pending"]) if pd.notna(ftc_row.iloc[0]["ftc_pending"]) else 0
     else:
-        signals["ftc_count"]   = 0
+        signals["ftc_count"] = 0
         signals["ftc_pending"] = 0
 
-    signals["judge_shortage"]    = signals["pop_per_lc_judge"] > signals["nat_avg_pop_lc_judge"]
+    signals["judge_shortage"] = signals["pop_per_lc_judge"] > signals["nat_avg_pop_lc_judge"]
     signals["clearance_problem"] = signals["lc_clearance_rate"] < signals["nat_avg_lc_clearance"]
-    signals["infra_shortage"]    = (signals["courthall_shortfall"] or 0) > signals["nat_avg_shortfall"]
-    signals["underfunded"]       = signals["budget_per_capita"] < signals["nat_avg_budget"]
+    signals["infra_shortage"] = signals["courthall_shortfall"] > signals["nat_avg_shortfall"]
+    signals["underfunded"] = signals["budget_per_capita"] < signals["nat_avg_budget"]
 
     return signals
 
-
+# ── Prompt ─────────────────────────────────────────────────────────────────────
 def build_prompt(signals):
-    return f"""You are CourtCompass AI, an expert judicial analytics reasoning agent for India.
+    return f"""
+You are CourtCompass AI.
 
-You have been given structured data about the state of {signals['state']}. Your job is to:
-1. Diagnose the TOP root causes of judicial backlog
-2. Reason step-by-step through the evidence
-3. Output a clear, actionable diagnosis
+State: {signals['state']}
 
-## Data for {signals['state']}:
+DATA:
+- Judge capacity: {signals['pop_per_lc_judge']} vs avg {signals['nat_avg_pop_lc_judge']}
+- Clearance: {signals['lc_clearance_rate']} vs avg {signals['nat_avg_lc_clearance']}
+- Infra shortfall: {signals['courthall_shortfall']}
+- Budget: {signals['budget_per_capita']}
 
-JUDGE CAPACITY:
-- Population per Lower Court Judge: {signals['pop_per_lc_judge']:,} (national avg: {signals['nat_avg_pop_lc_judge']:,})
-- Population per High Court Judge: {signals['pop_per_hc_judge']:,} (national avg: {signals['nat_avg_pop_hc_judge']:,})
-- Judge shortage flag: {'YES - above national average' if signals['judge_shortage'] else 'NO - within acceptable range'}
-
-CASE CLEARANCE (efficiency proxy):
-- Lower Court clearance rate: {signals['lc_clearance_rate']}% (national avg: {signals['nat_avg_lc_clearance']}%)
-- High Court clearance rate: {signals['hc_clearance_rate']}% (national avg: {signals['nat_avg_hc_clearance']}%)
-- Clearance problem flag: {'YES - below national average' if signals['clearance_problem'] else 'NO - performing adequately'}
-
-INFRASTRUCTURE:
-- Court hall shortfall: {signals['courthall_shortfall']}% (national avg: {signals['nat_avg_shortfall']}%)
-- Infrastructure shortage flag: {'YES' if signals['infra_shortage'] else 'NO'}
-
-BUDGET:
-- Budget per capita on judiciary: Rs.{signals['budget_per_capita']} (national avg: Rs.{signals['nat_avg_budget']})
-- Underfunded flag: {'YES - below national average' if signals['underfunded'] else 'NO'}
-
-FAST TRACK COURTS:
-- Number of Fast Track Courts: {signals['ftc_count']}
-- Cases still pending in FTCs: {signals['ftc_pending']:,}
-
-## Your task:
-Reason through the data above and produce:
-
-1. **One-line diagnosis** (the killer insight):
-   Format: "Backlog in [State] is likely driven by [cause 1] combined with [cause 2]."
-
-2. **Root Cause Analysis** (pick top 2-3 from: judge shortages, low clearance rates, infrastructure gaps, underfunding, adjournment patterns):
-   For each cause: state the evidence from the data, explain why it contributes to backlog.
-
-3. **Recommended Interventions** (2-3 specific, actionable suggestions)
-
-4. **Confidence level**: High / Medium / Low
-
-Be direct, data-backed, and concise. This is for policymakers and court administrators."""
-
-
-# ── Cached diagnosis ──────────────────────────────────────────────────────────
-@st.cache_data(ttl=3600, show_spinner=False)
-def run_diagnosis_cached(state_name, api_key, df_main_json, df_ftc_json):
-    df_main_local = pd.read_json(StringIO(df_main_json))
-    df_ftc_local  = pd.read_json(StringIO(df_ftc_json))
-    signals = diagnose_state(state_name, df_main_local, df_ftc_local)
-    if not signals:
-        return None, None
-    diagnosis = generate_with_fallback(api_key, build_prompt(signals))
-    return signals, diagnosis
-
-
-def run_diagnosis(state_name, api_key, df_main, df_ftc):
-    return run_diagnosis_cached(
-        state_name, api_key,
-        df_main.to_json(), df_ftc.to_json(),
-    )
-
+TASK:
+1. One-line diagnosis
+2. Top 2–3 causes with evidence
+3. 2–3 interventions
+4. Confidence level
+"""
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.title("⚖️ CourtCompass AI")
-st.caption("Reasoning agent for judicial backlog diagnosis · Microsoft Agents League Hackathon 2026")
 
 with st.sidebar:
-    st.header("🔑 Configuration")
-    api_key = st.text_input("Anthropic API Key", type="password", placeholder="sk-ant-...")
-    st.divider()
-    st.markdown("**📊 Datasets loaded:**")
-    st.success(f"✅ State judiciary indicators — {len(df_main)-1} states")
-    st.success(f"✅ High Court pendency — {len(df_hc)} courts")
-    st.success(f"✅ Fast Track Courts — {len(df_ftc)-1} states")
-    st.success(f"✅ HC disposal trends — {len(df_disp)} courts")
-    st.success(f"✅ Institution vs disposal — {len(df_xlsx)} years")
-    st.divider()
-    total_pending = df_tot["Number of Cases pending"].sum()
-    st.metric("Total pending cases in India", f"{total_pending/1e7:.2f} Cr")
+    api_key = st.text_input("Groq API Key", type="password")
 
-tab1, tab2, tab3 = st.tabs(["🔍 Diagnose a State", "📊 National Overview", "📈 Trends"])
+tab1, tab2, tab3 = st.tabs(["State", "National", "Trends"])
 
-# ── Tab 1 ─────────────────────────────────────────────────────────────────────
 with tab1:
-    st.subheader("Ask CourtCompass")
-    st.markdown("Select any Indian state to get a data-backed diagnosis of why pendency is high.")
+    states = sorted(df_main[df_main["state"] != "India"]["state"].tolist())
+    state = st.selectbox("State", states)
 
-    states = sorted(df_main[df_main["state"] != "India"]["state"].dropna().tolist())
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        selected_state = st.selectbox("Select a State/UT", states)
-    with col2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        diagnose_btn = st.button("🧠 Diagnose", use_container_width=True)
-
-    if diagnose_btn:
+    if st.button("Diagnose"):
         if not api_key:
-            st.error("Please enter your Anthropic API key in the sidebar.")
+            st.error("Enter API key")
         else:
-            with st.spinner(f"Analysing {selected_state}..."):
-                try:
-                    signals, diagnosis = run_diagnosis(selected_state, api_key, df_main, df_ftc)
-                except anthropic.AuthenticationError:
-                    st.error("❌ **Invalid API key.** Check your key at [console.anthropic.com](https://console.anthropic.com).")
-                    st.stop()
-                except anthropic.RateLimitError:
-                    st.error("⚠️ **Rate limit hit on all models.** Wait a minute and try again.")
-                    st.stop()
-                except RuntimeError as e:
-                    st.error(f"⚠️ {e}")
-                    st.stop()
-                except Exception as e:
-                    st.error(f"⚠️ Unexpected error: {e}")
-                    st.stop()
+            signals = diagnose_state(state, df_main, df_ftc)
+            if signals:
+                prompt = build_prompt(signals)
+                result = generate_with_fallback(api_key, prompt)
 
-            if signals is None:
-                st.error("State not found in dataset.")
-            else:
-                st.markdown("### 📋 Data Signals")
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Pop per LC Judge", f"{signals['pop_per_lc_judge']:,.0f}",
-                          delta=f"Nat avg: {signals['nat_avg_pop_lc_judge']:,.0f}", delta_color="inverse")
-                m2.metric("LC Clearance Rate", f"{signals['lc_clearance_rate']}%",
-                          delta=f"Nat avg: {signals['nat_avg_lc_clearance']}%")
-                m3.metric("Court Hall Shortfall", f"{signals['courthall_shortfall']}%",
-                          delta=f"Nat avg: {signals['nat_avg_shortfall']}%", delta_color="inverse")
-                m4.metric("Budget per Capita", f"Rs.{signals['budget_per_capita']}",
-                          delta=f"Nat avg: Rs.{signals['nat_avg_budget']}")
-
-                st.markdown("### 🚩 Root Cause Flags")
-                f1, f2, f3, f4 = st.columns(4)
-                f1.error("🔴 Judge Shortage") if signals["judge_shortage"] else f1.success("🟢 Judge Capacity OK")
-                f2.error("🔴 Clearance Problem") if signals["clearance_problem"] else f2.success("🟢 Clearance OK")
-                f3.error("🔴 Infra Shortage") if signals["infra_shortage"] else f3.success("🟢 Infra OK")
-                f4.error("🔴 Underfunded") if signals["underfunded"] else f4.success("🟢 Budget OK")
-
-                st.markdown("### 🧠 AI Diagnosis")
-                st.markdown(diagnosis)
-
-                if signals["ftc_count"] > 0:
-                    st.info(f"ℹ️ {selected_state} has {signals['ftc_count']} Fast Track Courts with {signals['ftc_pending']:,} cases still pending.")
-
-# ── Tab 2 ─────────────────────────────────────────────────────────────────────
-with tab2:
-    st.subheader("National Overview")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("**Population per Lower Court Judge by State**")
-        df_plot = df_main[df_main["state"] != "India"].sort_values("pop_per_lc_judge", ascending=True)
-        fig = px.bar(df_plot.tail(15), x="pop_per_lc_judge", y="state", orientation="h",
-                     color="pop_per_lc_judge", color_continuous_scale="Reds",
-                     labels={"pop_per_lc_judge": "Population per Judge", "state": ""})
-        fig.update_layout(showlegend=False, height=450, coloraxis_showscale=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.markdown("**Lower Court Clearance Rate by State**")
-        df_plot2 = df_main[df_main["state"] != "India"].sort_values("lc_clearance_rate", ascending=True)
-        fig2 = px.bar(df_plot2.tail(15), x="lc_clearance_rate", y="state", orientation="h",
-                      color="lc_clearance_rate", color_continuous_scale="RdYlGn",
-                      labels={"lc_clearance_rate": "Clearance Rate (%)", "state": ""})
-        fig2.add_vline(x=100, line_dash="dash", line_color="gray", annotation_text="100% line")
-        fig2.update_layout(showlegend=False, height=450, coloraxis_showscale=False)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("**Court Hall Shortfall % by State**")
-    df_short = df_main[df_main["state"] != "India"][["state", "courthall_shortfall"]].dropna()
-    fig3 = px.bar(df_short.sort_values("courthall_shortfall", ascending=False),
-                  x="state", y="courthall_shortfall", color="courthall_shortfall",
-                  color_continuous_scale="RdYlGn_r",
-                  labels={"courthall_shortfall": "Shortfall (%)", "state": "State"})
-    fig3.update_layout(height=350, coloraxis_showscale=False)
-    st.plotly_chart(fig3, use_container_width=True)
-
-# ── Tab 3 ─────────────────────────────────────────────────────────────────────
-with tab3:
-    st.subheader("Institution vs Disposal Trends (All India)")
-
-    fig4 = go.Figure()
-    fig4.add_trace(go.Scatter(x=df_xlsx["Years"], y=df_xlsx["Institution"],
-                              name="Cases Filed", line=dict(color="#EF553B", width=2),
-                              fill="tozeroy", fillcolor="rgba(239,85,59,0.1)"))
-    fig4.add_trace(go.Scatter(x=df_xlsx["Years"], y=df_xlsx["Disposal"],
-                              name="Cases Disposed", line=dict(color="#00CC96", width=2),
-                              fill="tozeroy", fillcolor="rgba(0,204,150,0.1)"))
-    fig4.update_layout(height=400, xaxis_title="Year", yaxis_title="Number of Cases",
-                       hovermode="x unified",
-                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    st.plotly_chart(fig4, use_container_width=True)
-    st.caption("Gap between filed and disposed = growing backlog. Note the 2020 COVID dip in disposals.")
-
-    st.markdown("**High Court Pendency (2022)**")
-    df_hc_plot = df_hc[df_hc["Name of the High Court"] != "Total"].sort_values(
-        "Pendency as on 31-12-2022", ascending=True)
-    fig5 = px.bar(df_hc_plot, x="Pendency as on 31-12-2022", y="Name of the High Court",
-                  orientation="h", color="Pendency as on 31-12-2022",
-                  color_continuous_scale="Reds",
-                  labels={"Pendency as on 31-12-2022": "Pending Cases", "Name of the High Court": ""})
-    fig5.update_layout(height=500, coloraxis_showscale=False)
-    st.plotly_chart(fig5, use_container_width=True)
+                st.subheader("Diagnosis")
+                st.write(result)
