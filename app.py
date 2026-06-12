@@ -1,14 +1,25 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import google.generativeai as genai
+from io import StringIO
 
-# ── PAGE ─────────────────────────────
 st.set_page_config(page_title="CourtCompass AI", page_icon="⚖️", layout="wide")
 
-# ── DATA ─────────────────────────────
+# ── DATA LOAD ─────────────────────────────
 @st.cache_data
 def load_data():
     df_main = pd.read_csv("data/Pendency of Court Cases in India.csv")
+    df_hc   = pd.read_csv("data/RS_Session_259_AU_119_1.csv")
+    df_ftc  = pd.read_csv("data/RS_Session_254_AU_419.A.csv")
+    df_disp = pd.read_csv("data/RS_Session_256_AU_4038_4.csv")
+    df_tot  = pd.read_csv("data/RS_Session_256_AU_3321_A_to_D.csv")
+
+    df_xlsx = pd.read_excel("data/Report (4).xlsx", skiprows=1)
+    df_xlsx.columns = ["Years", "Institution", "Disposal"]
+    df_xlsx = df_xlsx.dropna(subset=["Years"])
+    df_xlsx["Years"] = df_xlsx["Years"].astype(int)
 
     df_main = df_main.rename(columns={
         "State/UT": "state",
@@ -22,90 +33,95 @@ def load_data():
 
     df_main["courthall_shortfall"] = pd.to_numeric(df_main["courthall_shortfall"], errors="coerce")
 
-    return df_main
+    df_ftc = df_ftc.rename(columns={
+        "State/UT": "state",
+        "Number of Fast Track Court": "ftc_count",
+        "Number of Cases pending": "ftc_pending"
+    })
 
-df_main = load_data()
+    return df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx
 
-# ── GEMINI FIXED SETUP ─────────────────────────────
-def setup_gemini(api_key):
-    genai.configure(
-        api_key=api_key,
-        transport="rest"   # fixes v1beta issues
-    )
+df_main, df_hc, df_ftc, df_disp, df_tot, df_xlsx = load_data()
 
-    # IMPORTANT: correct working model name
-    return genai.GenerativeModel("models/gemini-1.5-flash-latest")
+# ── GEMINI FIXED CONFIG ─────────────────────────────
+def generate_with_gemini(api_key, prompt):
+    genai.configure(api_key=api_key)
 
+    # ✅ FIXED MODEL NAME (this was your error)
+    model = genai.GenerativeModel("gemini-1.5-pro")
 
-def generate(model, prompt):
     try:
-        res = model.generate_content(prompt)
-        return res.text
+        response = model.generate_content(prompt)
+        return response.text
     except Exception as e:
-        return f"ERROR: {str(e)}"
+        return f"Gemini error: {e}"
 
+# ── LOGIC ─────────────────────────────
+def diagnose_state(state_name, df_main, df_ftc):
+    state_row = df_main[df_main["state"].str.lower() == state_name.lower()]
+    ftc_row = df_ftc[df_ftc["state"].str.lower() == state_name.lower()]
 
-# ── ANALYSIS ENGINE ─────────────────────────────
-def analyze(state):
-    row = df_main[df_main["state"].str.lower() == state.lower()]
-    if row.empty:
+    if state_row.empty:
         return None
 
-    row = row.iloc[0]
+    row = state_row.iloc[0]
 
-    return {
-        "state": state,
-        "lc_clearance_rate": float(row["lc_clearance_rate"]),
-        "pop_per_lc_judge": float(row["pop_per_lc_judge"]),
+    nat = df_main[df_main["state"] != "India"]
+
+    signals = {
+        "state": row["state"],
         "budget_per_capita": float(row["budget_per_capita"]),
-        "courthall_shortfall": float(row["courthall_shortfall"] or 0),
-        "nat_lc": round(df_main["lc_clearance_rate"].mean(), 2),
-        "nat_pop": round(df_main["pop_per_lc_judge"].mean(), 0),
-        "nat_budget": round(df_main["budget_per_capita"].mean(), 0),
+        "pop_per_lc_judge": float(row["pop_per_lc_judge"]),
+        "lc_clearance_rate": float(row["lc_clearance_rate"]),
+        "hc_clearance_rate": float(row["hc_clearance_rate"]),
+        "courthall_shortfall": float(row["courthall_shortfall"]) if pd.notna(row["courthall_shortfall"]) else 0,
+        "nat_budget": nat["budget_per_capita"].mean(),
+        "nat_pop_lc": nat["pop_per_lc_judge"].mean(),
+        "nat_clearance": nat["lc_clearance_rate"].mean(),
     }
 
+    return signals
 
 # ── PROMPT ─────────────────────────────
 def build_prompt(s):
     return f"""
-You are CourtCompass AI (policy reasoning agent).
+You are CourtCompass AI.
 
-STATE: {s['state']}
+State: {s['state']}
 
 DATA:
-- Clearance rate: {s['lc_clearance_rate']} vs national {s['nat_lc']}
-- Judge load: {s['pop_per_lc_judge']} vs national {s['nat_pop']}
-- Budget: {s['budget_per_capita']} vs national {s['nat_budget']}
-- Infrastructure shortfall: {s['courthall_shortfall']}
+- Budget: {s['budget_per_capita']} vs {s['nat_budget']}
+- Judges: {s['pop_per_lc_judge']} vs {s['nat_pop_lc']}
+- Clearance: {s['lc_clearance_rate']} vs {s['nat_clearance']}
+- Infra shortfall: {s['courthall_shortfall']}
 
-TASK:
+Give:
 1. One-line diagnosis
-2. Top 2 root causes with evidence
-3. 2 actionable interventions
-4. Confidence level (High/Medium/Low)
+2. Causes
+3. Fixes
+4. Confidence
 """
 
-
-# ── UI ───────────────────────────────
+# ── UI ─────────────────────────────
 st.title("⚖️ CourtCompass AI")
 
-api_key = st.sidebar.text_input("Gemini API Key", type="password")
+with st.sidebar:
+    api_key = st.text_input("Gemini API Key", type="password")
 
-states = sorted(df_main["state"].dropna().unique())
-state = st.selectbox("Select State", states)
+tab1, tab2, tab3 = st.tabs(["State", "National", "Trends"])
 
-if st.button("Diagnose"):
-    if not api_key:
-        st.error("Enter Gemini API key")
-    else:
-        model = setup_gemini(api_key)
-        data = analyze(state)
+with tab1:
+    states = sorted(df_main[df_main["state"] != "India"]["state"].tolist())
+    state = st.selectbox("Select State", states)
 
-        if data is None:
-            st.error("State not found in dataset")
+    if st.button("Diagnose"):
+        if not api_key:
+            st.error("Add API key")
         else:
-            prompt = build_prompt(data)
-            result = generate(model, prompt)
+            s = diagnose_state(state, df_main, df_ftc)
+            if s:
+                prompt = build_prompt(s)
+                result = generate_with_gemini(api_key, prompt)
 
-            st.subheader("AI Diagnosis")
-            st.write(result)
+                st.subheader("AI Diagnosis")
+                st.write(result)
